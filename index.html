@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#174a72">
+<title>レジ精算アプリ 第2版</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;color:#17212b;background:#f3f6f8}
+*{box-sizing:border-box}body{margin:0;padding:14px}.wrap{max-width:1050px;margin:auto}
+h1{font-size:1.35rem;margin:4px 0 8px}.sub{color:#52616b;font-size:.9rem;margin-bottom:14px}
+.panel{background:#fff;border:1px solid #d9e1e7;border-radius:12px;padding:14px;margin:12px 0;box-shadow:0 1px 3px #0000000a}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+label{font-size:.9rem;font-weight:600}input[type=date],input[type=number]{font:inherit;padding:8px;border:1px solid #bac7d1;border-radius:7px;min-width:0}
+input[type=number]{width:90px;text-align:right}
+button{border:0;border-radius:8px;padding:10px 14px;font:inherit;font-weight:650;background:#174a72;color:white;cursor:pointer}
+button.secondary{background:#e6edf2;color:#17364b}button.danger{background:#a83232}
+button:disabled{opacity:.5}
+table{width:100%;border-collapse:collapse;font-size:.88rem}th,td{padding:8px 6px;border-bottom:1px solid #e5eaee;text-align:right}
+th{background:#edf3f7;white-space:nowrap}td:first-child,th:first-child{text-align:left}
+.grouphead{background:#dce9f2;font-weight:700;text-align:left!important}
+input[type=number]{width:78px;padding:6px}
+.tablewrap{overflow-x:auto}.totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.totalbox{background:#f3f7fa;border-radius:9px;padding:12px}.totalbox strong{display:block;font-size:1.25rem;margin-top:4px}
+.status{font-weight:750;font-size:1.05rem;padding:10px;border-radius:8px;margin-top:10px}
+.ok{background:#e4f5e9;color:#176331}.ng{background:#fff0e9;color:#9b321b}
+.small{font-size:.82rem;color:#52616b}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.history-item{padding:9px 0;border-bottom:1px solid #e5eaee;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+@media(max-width:600px){body{padding:8px}.panel{padding:10px}th,td{padding:6px 4px}input[type=number]{width:68px}}
+</style>
+
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon-192.png">
+</head>
+<body><div class="wrap">
+<h1>レジ精算アプリ 第2版</h1>
+<div class="sub">前日と当日の金種内訳が違っても、レジA・レジBそれぞれの合計金額が一致すれば「OK」と判定します。</div>
+<div class="panel toolbar">
+<label for="date">精算日</label><input type="date" id="date">
+<button class="secondary" id="loadBtn">この日の記録を読み込む</button>
+</div>
+<div id="registers"></div>
+<div class="panel">
+<h2 style="font-size:1.05rem;margin-top:0">照合結果</h2>
+<div class="totals">
+<div class="totalbox">レジA 前日合計<strong id="aPrev">¥0</strong></div>
+<div class="totalbox">レジA 当日合計<strong id="aNow">¥0</strong></div>
+<div class="totalbox">レジA 差額<strong id="aDiff">¥0</strong></div>
+<div class="totalbox">レジB 前日合計<strong id="bPrev">¥0</strong></div>
+<div class="totalbox">レジB 当日合計<strong id="bNow">¥0</strong></div>
+<div class="totalbox">レジB 差額<strong id="bDiff">¥0</strong></div>
+</div>
+<div id="status" class="status">入力してください</div>
+<div class="small" style="margin-top:8px">※金種ごとの枚数差ではなく、レジA・レジBそれぞれの合計金額で判定します。</div>
+<div class="actions">
+<button id="saveBtn">この日の精算を保存</button>
+<button id="carryBtn" class="secondary">翌日に繰り越す</button>
+<button id="csvBtn" class="secondary">Excel用CSVを書き出す</button>
+<button id="clearBtn" class="danger">入力をクリア</button>
+</div>
+</div>
+<div class="panel">
+<h2 style="font-size:1.05rem;margin-top:0">保存済みの日別記録</h2>
+<div id="history" class="small">まだ記録はありません。</div>
+</div>
+</div>
+<script>
+const groups = [
+ {id:"aCoinRoll",title:"レジA・硬貨（棒金）",register:"A",kind:"硬貨",items:[["500円",500],["100円",100],["50円",50],["10円",10]]},
+ {id:"aCoinLoose",title:"レジA・硬貨（バラ銭）",register:"A",kind:"硬貨",items:[["500円",500],["100円",100],["50円",50],["10円",10]]},
+ {id:"aBills",title:"レジA・紙幣",register:"A",kind:"紙幣",items:[["1,000円",1000],["5,000円",5000],["10,000円",10000]]},
+ {id:"bBills",title:"レジB・紙幣",register:"B",kind:"紙幣",items:[["1,000円",1000],["5,000円",5000],["10,000円",10000]]}
+];
+const $=id=>document.getElementById(id);
+const STORAGE="cashRegisterSettlementV2";
+let records=JSON.parse(localStorage.getItem(STORAGE)||"{}");
+let state={};
+function blank(){let s={};groups.forEach(g=>g.items.forEach((it,i)=>s[g.id+"_"+i]={prev:0,now:0}));return s}
+function yen(n){return "¥"+Number(n||0).toLocaleString("ja-JP")}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function render(){
+ let root=$("registers");root.innerHTML="";
+ groups.forEach(g=>{
+  let p=document.createElement("div");p.className="panel";
+  let rows=g.items.map((it,i)=>{let k=g.id+"_"+i,v=state[k]||{prev:0,now:0};return `<tr><td>${it[0]}</td><td><input type="number" min="0" step="1" data-k="${k}" data-f="prev" value="${v.prev}"></td><td><input type="number" min="0" step="1" data-k="${k}" data-f="now" value="${v.now}"></td><td>${yen(it[1])}</td><td>${yen(v.prev*it[1])}</td><td>${yen(v.now*it[1])}</td></tr>`}).join("");
+  p.innerHTML=`<h2 style="font-size:1.05rem;margin:0 0 10px">${g.title}</h2><div class="tablewrap"><table><thead><tr><th>金種</th><th>前日枚数</th><th>当日枚数</th><th>単価</th><th>前日金額</th><th>当日金額</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  root.appendChild(p);
+ });
+ root.querySelectorAll("input").forEach(inp=>inp.addEventListener("input",()=>{let k=inp.dataset.k,f=inp.dataset.f;state[k][f]=Math.max(0,parseInt(inp.value||"0",10)||0);refresh()}));
+ refresh();
+}
+function totals(){
+ let out={A:{prev:0,now:0},B:{prev:0,now:0}};
+ groups.forEach(g=>g.items.forEach((it,i)=>{let v=state[g.id+"_"+i]||{prev:0,now:0};out[g.register].prev+=v.prev*it[1];out[g.register].now+=v.now*it[1]}));
+ return out;
+}
+function refresh(){
+ let t=totals(),da=t.A.now-t.A.prev,db=t.B.now-t.B.prev;
+ $("aPrev").textContent=yen(t.A.prev);$("aNow").textContent=yen(t.A.now);$("aDiff").textContent=(da>0?"+":"")+yen(da);
+ $("bPrev").textContent=yen(t.B.prev);$("bNow").textContent=yen(t.B.now);$("bDiff").textContent=(db>0?"+":"")+yen(db);
+ let ok=da===0&&db===0,s=$("status");s.className="status "+(ok?"ok":"ng");
+ s.textContent=ok?"OK：レジA・レジBともに合計金額が一致しています":`不一致：${[da!==0?"レジA":"",db!==0?"レジB":""].filter(Boolean).join("・")}の合計金額が一致していません`;
+}
+function save(){
+ let d=$("date").value;if(!d){alert("精算日を選択してください");return}
+ records[d]=JSON.parse(JSON.stringify(state));localStorage.setItem(STORAGE,JSON.stringify(records));renderHistory();alert(d+" の精算を保存しました。");
+}
+function load(d){
+ state=records[d]?JSON.parse(JSON.stringify(records[d])):blank();$("date").value=d;render();
+}
+function renderHistory(){
+ let keys=Object.keys(records).sort().reverse();$("history").innerHTML=keys.length?keys.map(d=>`<div class="history-item"><span><b>${esc(d)}</b></span><span><button class="secondary" data-load="${d}">読み込む</button> <button class="danger" data-del="${d}">削除</button></span></div>`).join(""):"まだ記録はありません。";
+ $("history").querySelectorAll("[data-load]").forEach(b=>b.onclick=()=>load(b.dataset.load));
+ $("history").querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>{if(confirm(b.dataset.del+" の記録を削除しますか？")){delete records[b.dataset.del];localStorage.setItem(STORAGE,JSON.stringify(records));renderHistory()}});
+}
+function carry(){
+ let d=$("date").value;if(!d){alert("精算日を選択してください");return}
+ records[d]=JSON.parse(JSON.stringify(state));localStorage.setItem(STORAGE,JSON.stringify(records));
+ let next=new Date(d+"T12:00:00");next.setDate(next.getDate()+1);let nd=next.toISOString().slice(0,10);
+ let nextState=JSON.parse(JSON.stringify(state));Object.keys(nextState).forEach(k=>nextState[k]={prev:nextState[k].now,now:nextState[k].now});
+ records[nd]=nextState;localStorage.setItem(STORAGE,JSON.stringify(records));load(nd);renderHistory();
+ alert(nd+" の前日枚数・当日枚数に、今回の当日枚数を引き継ぎました。");
+}
+function csv(){
+ let keys=Object.keys(records).sort();if(!keys.length){alert("保存済みの記録がありません");return}
+ const q=v=>'"'+String(v??"").replace(/"/g,'""')+'"';
+ let lines=[["日付","レジ","区分","内訳","金種","単価(円)","前日枚数","当日枚数","前日金額(円)","当日金額(円)","差額(円)"]];
+ keys.forEach(d=>{
+  let s=records[d],sum={A:{p:0,n:0},B:{p:0,n:0}};
+  groups.forEach(g=>g.items.forEach((it,i)=>{
+   let v=s[g.id+"_"+i]||{prev:0,now:0},p=v.prev*it[1],n=v.now*it[1];
+   sum[g.register].p+=p;sum[g.register].n+=n;
+   lines.push([d,g.register,g.kind,g.title.replace(/^レジ[AB]・/,""),it[0],it[1],v.prev,v.now,p,n,n-p]);
+  }));
+  ["A","B"].forEach(r=>lines.push([d,r,"合計","レジ合計","", "", "", "",sum[r].p,sum[r].n,sum[r].n-sum[r].p]));
+  lines.push(["","","","","","","","","","",""]);
+ });
+ let csvText="\uFEFF"+lines.map(row=>row.map(q).join(",")).join("\r\n");
+ let blob=new Blob([csvText],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");
+ a.href=url;a.download="レジ精算_日別一覧.csv";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+}
+$("date").value=new Date().toISOString().slice(0,10);
+$("loadBtn").onclick=()=>load($("date").value);
+$("saveBtn").onclick=save;$("carryBtn").onclick=carry;$("csvBtn").onclick=csv;
+$("clearBtn").onclick=()=>{if(confirm("現在の入力内容をクリアしますか？")){state=blank();render()}};
+load($("date").value);renderHistory();
+</script>
+
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+}
+</script>
+</body></html>
